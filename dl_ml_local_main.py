@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Türkçe Akademik PDF Analiz Sistemi (Özet + Yöntem + Bulgular + Kaynakça)
-- Çoklu PDF desteği (klasör veya liste)
-- Section detection (Özet, Giriş, Yöntem, Bulgular, Sonuç, Kaynakça)
-- Hiyerarşik özetleme (mT5 XLSum)
-- QA (BERT Turkish SQuAD) + TF-IDF chunk retrieval
-- Kaynakça parse (deterministik)
+Türkçe Akademik PDF Analiz Sistemi (GÜNCELLENMİŞ VERSİYON)
+- İyileştirilmiş Başlık Tespiti
+- Genişletilmiş Yöntem (Algoritma) Sözlüğü
+- Halüsinasyon azaltılmış özetleme
 """
 
 import os
@@ -26,13 +24,14 @@ from transformers import (
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
+
     SKLEARN_OK = True
 except Exception:
     SKLEARN_OK = False
 
 
 # ----------------------------
-# NLTK
+# 1. NLTK & AYARLAR
 # ----------------------------
 def ensure_nltk():
     try:
@@ -40,9 +39,11 @@ def ensure_nltk():
     except LookupError:
         nltk.download("punkt")
 
+
 ensure_nltk()
 
 TR_ABBR = ["dr", "prof", "doç", "şek", "sek", "tab", "bkz", "vd", "örn", "sn", "mr", "mrs"]
+
 
 def better_sentence_split(text: str) -> List[str]:
     tmp = text
@@ -53,16 +54,18 @@ def better_sentence_split(text: str) -> List[str]:
 
 
 # ----------------------------
-# MODELS
+# 2. MODELLERİN YÜKLENMESİ
 # ----------------------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[INFO] Cihaz: {device}")
 
+# Özetleme Modeli
 SUM_MODEL_NAME = "csebuetnlp/mT5_multilingual_XLSum"
 print(f"[INFO] Özetleme modeli yükleniyor: {SUM_MODEL_NAME}")
 tokenizer_sum = AutoTokenizer.from_pretrained(SUM_MODEL_NAME)
 model_sum = AutoModelForSeq2SeqLM.from_pretrained(SUM_MODEL_NAME).to(device)
 
+# Soru-Cevap Modeli
 QA_MODEL_NAME = "savasy/bert-base-turkish-squad"
 print(f"[INFO] QA modeli yükleniyor: {QA_MODEL_NAME}")
 tokenizer_qa = AutoTokenizer.from_pretrained(QA_MODEL_NAME)
@@ -79,11 +82,12 @@ print("[INFO] Modeller hazır.\n")
 
 
 # ----------------------------
-# PDF READ (layout korunur + header/footer temizliği)
+# 3. PDF OKUMA & TEMİZLEME
 # ----------------------------
 def _page_lines(page_text: str) -> List[str]:
     lines = [ln.strip() for ln in (page_text or "").splitlines()]
     return [ln for ln in lines if ln]
+
 
 def read_pdf_keep_layout(file_path: str) -> str:
     reader = PyPDF2.PdfReader(file_path)
@@ -125,24 +129,22 @@ def read_pdf_keep_layout(file_path: str) -> str:
     return "\n\n".join(cleaned_pages)
 
 
-# ----------------------------
-# TEXT NORMALIZE (HATA DÜZELTİLDİ: tek normalize_text)
-# ----------------------------
 def fix_spaced_words(s: str) -> str:
-    # "L u c k i n" -> "Luckin", "D erleme" -> "Derleme" gibi
+    # "L u c k i n" -> "Luckin", "D erleme" -> "Derleme"
     pattern = r"\b(?:[A-Za-zÇĞİÖŞÜçğıöşü]\s){2,}[A-Za-zÇĞİÖŞÜçğıöşü]\b"
     return re.sub(pattern, lambda m: m.group(0).replace(" ", ""), s)
 
+
 def normalize_text(text: str) -> str:
-    text = text.replace("-\n", "")              # satır sonu tire birleşimi
-    text = re.sub(r"[ \t]+", " ", text)         # çoklu boşlukları azalt
-    text = re.sub(r"\n{3,}", "\n\n", text)      # çoklu newline azalt
-    text = fix_spaced_words(text)               # BOZUK KELİME BİRLEŞTİRME
+    text = text.replace("-\n", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = fix_spaced_words(text)
     return text.strip()
 
 
 # ----------------------------
-# SECTION DETECTION (Türkçe odaklı)  ✅ SÖZLÜK DÜZGÜN KAPATILDI
+# 4. BÖLÜM TESPİTİ (Section Detection)
 # ----------------------------
 SECTION_HEADINGS = {
     "abstract": [
@@ -181,16 +183,16 @@ STOP_AFTER_REFS = [
     r"^\s*yazar\s+katk(ı|i)lar(ı|i)|^\s*author\s+contrib",
 ]
 
+
 def find_sections(text: str) -> Dict[str, str]:
     lines = text.splitlines()
-
     hits: List[Tuple[int, str]] = []
+
     for idx, line in enumerate(lines):
         s = line.strip()
         if not s or len(s) > 90:
             continue
         low = s.lower()
-
         for sec, patterns in SECTION_HEADINGS.items():
             for p in patterns:
                 if re.match(p, low, flags=re.IGNORECASE):
@@ -201,12 +203,12 @@ def find_sections(text: str) -> Dict[str, str]:
         return {}
 
     hits = sorted(list(set(hits)), key=lambda x: x[0])
-
     sections: Dict[str, str] = {}
+
     for i, (start_idx, sec) in enumerate(hits):
         end_idx = hits[i + 1][0] if i + 1 < len(hits) else len(lines)
         block = "\n".join(lines[start_idx:end_idx]).strip()
-        block = re.sub(r"^.*\n", "", block, count=1).strip()  # başlık satırını çıkar
+        block = re.sub(r"^.*\n", "", block, count=1).strip()
         if len(block) > 200:
             sections[sec] = block
 
@@ -228,7 +230,7 @@ def find_sections(text: str) -> Dict[str, str]:
 
 
 # ----------------------------
-# CHUNKING + RETRIEVAL
+# 5. CHUNKING & RETRIEVAL
 # ----------------------------
 def semantic_sliding_window(text: str, max_tokens=700, overlap=2) -> List[str]:
     sentences = better_sentence_split(text)
@@ -251,17 +253,22 @@ def semantic_sliding_window(text: str, max_tokens=700, overlap=2) -> List[str]:
         chunks.append(" ".join(cur))
     return chunks
 
+
 def retrieve_top_chunks(chunks: List[str], query: str, k=6) -> List[str]:
     if not chunks:
         return []
 
     if SKLEARN_OK:
-        vec = TfidfVectorizer(ngram_range=(1, 2), max_features=50000)
-        X = vec.fit_transform(chunks + [query])
-        sims = cosine_similarity(X[-1], X[:-1]).flatten()
-        top_idx = sims.argsort()[::-1][:k]
-        return [chunks[i] for i in top_idx]
+        try:
+            vec = TfidfVectorizer(ngram_range=(1, 2), max_features=50000)
+            X = vec.fit_transform(chunks + [query])
+            sims = cosine_similarity(X[-1], X[:-1]).flatten()
+            top_idx = sims.argsort()[::-1][:k]
+            return [chunks[i] for i in top_idx]
+        except:
+            pass  # Fallback to word match if sklearn fails for some reason
 
+    # Basit kelime eşleşmesi (Fallback)
     q = [w for w in query.lower().split() if len(w) > 3]
     scored = []
     for c in chunks:
@@ -274,11 +281,10 @@ def retrieve_top_chunks(chunks: List[str], query: str, k=6) -> List[str]:
 
 
 # ----------------------------
-# SUMMARIZATION (hiyerarşik)
+# 6. ÖZETLEME (GÜNCELLENDİ: Parametreler iyileştirildi)
 # ----------------------------
 def summarize_once(text: str, max_new_tokens=320, min_new_tokens=140) -> str:
     inp_text = f"summarize: {text}"
-
     input_ids = tokenizer_sum(
         inp_text,
         return_tensors="pt",
@@ -286,6 +292,7 @@ def summarize_once(text: str, max_new_tokens=320, min_new_tokens=140) -> str:
         max_length=512
     ).input_ids.to(device)
 
+    # Halüsinasyonu azaltmak için repetition_penalty artırıldı (1.15 -> 1.25)
     out_ids = model_sum.generate(
         input_ids,
         max_new_tokens=max_new_tokens,
@@ -293,10 +300,11 @@ def summarize_once(text: str, max_new_tokens=320, min_new_tokens=140) -> str:
         num_beams=4,
         length_penalty=1.0,
         no_repeat_ngram_size=3,
-        repetition_penalty=1.15,
+        repetition_penalty=1.25,
         early_stopping=True,
     )
     return tokenizer_sum.decode(out_ids[0], skip_special_tokens=True).strip()
+
 
 def hierarchical_summary(text: str, chunk_tokens=700) -> str:
     chunks = semantic_sliding_window(text, max_tokens=chunk_tokens, overlap=2)
@@ -317,7 +325,7 @@ def hierarchical_summary(text: str, chunk_tokens=700) -> str:
 
 
 # ----------------------------
-# QA (retrieve -> QA)
+# 7. QA & REFERANS PARSE
 # ----------------------------
 def answer_question(full_text: str, question: str) -> str:
     chunks = semantic_sliding_window(full_text, max_tokens=420, overlap=2)
@@ -331,44 +339,42 @@ def answer_question(full_text: str, question: str) -> str:
             r = qa_pipeline(question=question, context=ch)
             if r["score"] > best_score:
                 a0, a1 = r["start"], r["end"]
+                # Cümle sınırlarını bulmaya çalış
                 sent_start = ch.rfind(".", 0, a0) + 1
                 sent_end = ch.find(".", a1)
-                if sent_end == -1:
-                    sent_end = len(ch)
+                if sent_end == -1: sent_end = len(ch)
+
                 cand = ch[sent_start:sent_end].strip()
-                best_text = cand if len(cand) > 12 else r.get("answer", "Belirtilmemiş.")
+                if len(cand) > 12:
+                    best_text = cand
+                else:
+                    best_text = r.get("answer", "Belirtilmemiş.")
                 best_score = r["score"]
-        except Exception:
+        except:
             pass
 
     return best_text
 
 
-# ----------------------------
-# REFERENCES PARSER
-# ----------------------------
 def extract_references_from_section(ref_section: str, max_items=30) -> List[str]:
     lines = [ln.strip() for ln in ref_section.splitlines() if ln.strip()]
     items = []
     cur = ""
 
     def is_new_item(line: str) -> bool:
-        if re.match(r"^(\[\d+\]|\d+[\.\)])\s+", line):
-            return True
-        if re.match(r"^[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü\-’' ]{1,40}\(\d{4}\)", line):
-            return True
+        # [1] veya 1. gibi numaralar
+        if re.match(r"^(\[\d+\]|\d+[\.\)])\s+", line): return True
+        # Soyad, A. (Yıl) formatı
+        if re.match(r"^[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü\-’' ]{1,40}\(\d{4}\)", line): return True
         return False
 
     for ln in lines:
         if is_new_item(ln):
-            if cur:
-                items.append(cur.strip())
+            if cur: items.append(cur.strip())
             cur = ln
         else:
             cur = (cur + " " + ln).strip() if cur else ln
-
-        if len(items) >= max_items:
-            break
+        if len(items) >= max_items: break
 
     if cur and len(items) < max_items:
         items.append(cur.strip())
@@ -378,7 +384,7 @@ def extract_references_from_section(ref_section: str, max_items=30) -> List[str]
 
 
 # ----------------------------
-# METHODS EXTRACTION (hibrit)
+# 8. YÖNTEM TESPİTİ (GÜNCELLENDİ: Genişletilmiş Regex)
 # ----------------------------
 METHOD_REGEX = re.compile(
     r"\b("
@@ -393,24 +399,36 @@ METHOD_REGEX = re.compile(
     r"lstm|gru|transformer|bert|t5|mt5|"
     r"tf[- ]?idf|word2vec|fasttext|"
     r"pca|k[- ]?means|"
+    # --- EKLENEN KISIM (Eğitim / Genel AI Terimleri) ---
+    r"uzman\s+sistemler?|expert\s+systems?|"
+    r"ak(ı|i)ll(ı|i)\s+(ö|o)(ğ|g)retim\s+sistemleri|intelligent\s+tutoring|"
+    r"bireyselle(ş|s)tirilmi(ş|s)\s+(ö|o)(ğ|g)renme|"
+    r"makine\s+(ö|o)(ğ|g)renmesi|machine\s+learning|"
+    r"derin\s+(ö|o)(ğ|g)renme|deep\s+learning|"
+    r"yapay\s+sinir\s+a(ğ|g)lar(ı|i)|ann|"
+    r"veri\s+madencili(ğ|g)i|data\s+mining|"
+    r"bulan(ı|i)k\s+mant(ı|i)k|fuzzy\s+logic"
     r")\b",
     flags=re.IGNORECASE
 )
 
+
 def extract_methods(sections: Dict[str, str], full_text: str) -> Tuple[str, List[str]]:
     methods_text = sections.get("methods", "")
 
+    # Eğer başlıkta Yöntem bulunamadıysa veya çok kısaysa metin içinden ara
     if not methods_text or len(methods_text) < 300:
         chunks = semantic_sliding_window(full_text, max_tokens=650, overlap=2)
         top = retrieve_top_chunks(
             chunks,
-            "yöntem metodoloji kullanılan yöntemler algoritma model veri seti deneysel kurulum",
+            "yöntem metodoloji kullanılan yöntemler algoritma model veri seti deneysel kurulum uzman sistem",
             k=8
         )
         methods_text = "\n".join(top)
 
     methods_summary = hierarchical_summary(methods_text)
 
+    # Hem ham metinden hem özetten regex ile yakala
     found = {m.group(0).strip() for m in METHOD_REGEX.finditer(methods_text)}
     found2 = {m.group(0).strip() for m in METHOD_REGEX.finditer(methods_summary)}
     method_list = sorted(set(found | found2), key=lambda x: x.lower())
@@ -419,28 +437,45 @@ def extract_methods(sections: Dict[str, str], full_text: str) -> Tuple[str, List
 
 
 # ----------------------------
-# TITLE HEURISTIC
+# 9. BAŞLIK TESPİTİ (GÜNCELLENDİ: Heuristic İyileştirme)
 # ----------------------------
 def guess_title(text: str) -> str:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     candidates = []
-    for ln in lines[:30]:
-        if 8 <= len(ln) <= 120:
-            if re.match(r"^\d+[\.\)]\s+", ln):
-                continue
-            if ln.lower() in ["özet", "giriş", "yöntem", "bulgular", "sonuç", "kaynakça"]:
-                continue
-            candidates.append(ln)
+
+    # Bu kelimeler geçiyorsa muhtemelen dergi bilgisidir, başlık değildir
+    ignore_keywords = ["dergisi", "journal", "issn", "cilt", "vol", "sayı", "no:", "tarih", "kabul", "geliş", "yayın"]
+
+    for ln in lines[:45]:  # İlk 45 satıra bak
+        # Çok kısa veya aşırı uzunları ele
+        if not (10 <= len(ln) <= 200):
+            continue
+
+        low_ln = ln.lower()
+
+        # Bölüm başlıklarını atla
+        if low_ln in ["özet", "giriş", "yöntem", "bulgular", "sonuç", "kaynakça", "abstract", "introduction"]:
+            continue
+
+        # "1. Giriş" gibi satırları atla
+        if re.match(r"^\d+[\.\)]\s+", ln):
+            continue
+
+        # Yasaklı kelime kontrolü
+        if any(bad in low_ln for bad in ignore_keywords):
+            continue
+
+        candidates.append(ln)
 
     if not candidates:
         return "Başlık bulunamadı"
 
-    candidates = sorted(candidates, key=lambda s: (s.endswith("."), abs(len(s) - 70)))
+    # İlk uygun adayı döndür (Genelde en üstteki temiz satır başlıktır)
     return candidates[0]
 
 
 # ----------------------------
-# REPORT DATACLASS
+# 10. RAPORLAMA VE ANA AKIŞ
 # ----------------------------
 @dataclass
 class PaperReport:
@@ -455,9 +490,6 @@ class PaperReport:
     references: List[str]
 
 
-# ----------------------------
-# MAIN PIPELINE
-# ----------------------------
 def build_report_for_pdf(pdf_path: str) -> PaperReport:
     raw = read_pdf_keep_layout(pdf_path)
     text = normalize_text(raw)
@@ -465,43 +497,43 @@ def build_report_for_pdf(pdf_path: str) -> PaperReport:
     title = guess_title(text)
     sections = find_sections(text)
 
+    # Amaç sorusu
     purpose = answer_question(text, "Çalışmanın temel amacı nedir?")
 
+    # Genel Özet için metin birleştirme
     base_parts = []
-    if "abstract" in sections:
-        base_parts.append(sections["abstract"])
-    if "results" in sections:
-        base_parts.append(sections["results"][:8000])
-    if "conclusion" in sections:
-        base_parts.append(sections["conclusion"][:6000])
+    if "abstract" in sections: base_parts.append(sections["abstract"])
+    if "results" in sections: base_parts.append(sections["results"][:8000])
+    if "conclusion" in sections: base_parts.append(sections["conclusion"][:6000])
 
     if base_parts:
         overall_base = "\n\n".join(base_parts)
     else:
+        # Bölüm yoksa TF-IDF ile önemli kısımları çek
         chunks = semantic_sliding_window(text, max_tokens=650, overlap=2)
-        top = retrieve_top_chunks(
-            chunks,
-            "amaç hedef objective yöntem metodoloji bulgular sonuç katkı çıkarım",
-            k=10
-        )
+        top = retrieve_top_chunks(chunks, "amaç hedef objective yöntem bulgular sonuç", k=10)
         overall_base = "\n".join(top)
 
     overall_summary = hierarchical_summary(overall_base)
 
+    # Yöntem Analizi
     methods_summary, methods_list = extract_methods(sections, text)
 
+    # Bulgular Analizi
     if "results" in sections:
         results_summary = hierarchical_summary(sections["results"][:9000])
     else:
         chunks = semantic_sliding_window(text, max_tokens=650, overlap=2)
-        top = retrieve_top_chunks(chunks, "bulgular sonuçlar deneysel sonuç performans karşılaştırma", k=8)
+        top = retrieve_top_chunks(chunks, "bulgular sonuçlar deneysel performans analiz tablo", k=8)
         results_summary = hierarchical_summary("\n".join(top))
 
+    # Sonuç Analizi
     if "conclusion" in sections:
         conclusion_summary = hierarchical_summary(sections["conclusion"][:7000])
     else:
-        conclusion_summary = answer_question(text, "Çalışmanın sonucu nedir?")
+        conclusion_summary = answer_question(text, "Çalışmanın genel sonucu nedir?")
 
+    # Kaynakça
     references = []
     if "references" in sections:
         references = extract_references_from_section(sections["references"], max_items=30)
@@ -526,8 +558,7 @@ def synthesize_across_papers(reports: List[PaperReport]) -> Dict:
 
     for r in reports:
         combined.append(
-            f"MAKALE: {r.title}\nAMAÇ: {r.purpose}\nÖZET: {r.overall_summary}\nSONUÇ: {r.conclusion_summary}"
-        )
+            f"MAKALE: {r.title}\nAMAÇ: {r.purpose}\nÖZET: {r.overall_summary}\nSONUÇ: {r.conclusion_summary}")
         all_methods.extend(r.methods_list)
         all_refs.extend(r.references)
 
@@ -537,15 +568,13 @@ def synthesize_across_papers(reports: List[PaperReport]) -> Dict:
     norm = {}
     for m in all_methods:
         key = m.lower().strip()
-        if key not in norm:
-            norm[key] = m.strip()
+        if key not in norm: norm[key] = m.strip()
     methods_merged = sorted(norm.values(), key=lambda x: x.lower())
 
     ref_norm = {}
     for ref in all_refs:
         key = re.sub(r"\s+", " ", ref).strip().lower()
-        if key not in ref_norm:
-            ref_norm[key] = ref.strip()
+        if key not in ref_norm: ref_norm[key] = ref.strip()
     refs_merged = list(ref_norm.values())[:50]
 
     return {
@@ -556,10 +585,11 @@ def synthesize_across_papers(reports: List[PaperReport]) -> Dict:
 
 
 # ----------------------------
-# CONFIG + RUN
+# 11. ÇALIŞTIRMA (MAIN)
 # ----------------------------
 if __name__ == "__main__":
-    PDF_FOLDER = ""  # örn: "pdfs"
+    PDF_FOLDER = ""
+    # BURAYA KENDİ PDF İSİMLERİNİZİ YAZIN
     PDF_PATHS = [
         "makale2.pdf",
     ]
@@ -574,12 +604,12 @@ if __name__ == "__main__":
         pdf_files = [p for p in PDF_PATHS if os.path.exists(p)]
 
     if not pdf_files:
-        print("[ERROR] PDF bulunamadı. PDF_FOLDER veya PDF_PATHS kontrol et.")
+        print("[ERROR] PDF bulunamadı. Lütfen PDF_PATHS listesini kontrol edin.")
         raise SystemExit
 
     reports: List[PaperReport] = []
     for i, pdf in enumerate(pdf_files, 1):
-        print(f"\n{'='*80}\n[{i}/{len(pdf_files)}] İşleniyor: {pdf}\n{'='*80}")
+        print(f"\n{'=' * 80}\n[{i}/{len(pdf_files)}] İşleniyor: {pdf}\n{'=' * 80}")
         rep = build_report_for_pdf(pdf)
         reports.append(rep)
 
@@ -592,33 +622,23 @@ if __name__ == "__main__":
         print("\n--- GENEL ÖZET ---")
         print(rep.overall_summary)
 
-        print("\n--- YÖNTEM (ÖZET) ---")
-        print(rep.methods_summary)
-
         print("\n--- YÖNTEM (LİSTE) ---")
         print(", ".join(rep.methods_list) if rep.methods_list else "Yöntem adı yakalanamadı.")
-
-        print("\n--- BULGULAR (ÖZET) ---")
-        print(rep.results_summary)
 
         print("\n--- SONUÇ (ÖZET) ---")
         print(rep.conclusion_summary)
 
-        print("\n--- KAYNAKÇA (İLK 30) ---")
+        print("\n--- KAYNAKÇA (İLK 5) ---")
         if rep.references:
-            for j, r in enumerate(rep.references, 1):
+            for j, r in enumerate(rep.references[:5], 1):
                 print(f"{j}. {r}")
         else:
-            print("Kaynakça bölümü bulunamadı / parse edilemedi.")
+            print("Kaynakça bulunamadı.")
 
     if len(reports) > 1:
-        print(f"\n{'='*80}\n[HARMANLANMIŞ META RAPOR]\n{'='*80}")
+        print(f"\n{'=' * 80}\n[HARMANLANMIŞ META RAPOR]\n{'=' * 80}")
         meta = synthesize_across_papers(reports)
-        print("\n--- META ÖZET ---")
         print(meta["meta_summary"])
-
-        print("\n--- ORTAK YÖNTEMLER (İLK 40) ---")
-        print(", ".join(meta["common_methods"]) if meta["common_methods"] else "Yöntem bulunamadı.")
 
     out = {
         "device": device,
